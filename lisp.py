@@ -23,14 +23,11 @@ class TokenType(enum.Enum):
     BUILTIN = enum.auto()
 
 
-# atom: int|float|str|symbol|builtin
-# expr: atom | `(` expr* `)`
-
-
 class Builtin(enum.Enum):
     LET = "let"
+    SET = "set"
     LAMBDA = "lambda"
-    IF = "if"
+    COND = "cond"
     # AND = "and"
     # OR = "or"
     # NOT = "not"
@@ -44,8 +41,11 @@ class Builtin(enum.Enum):
     # sexpr
     SEXPR = "sexpr"
 
-    STRCAT = "strcat"
+    READ = "read"
+    EVAL = "eval"
     PRINT = "print"
+
+    STRCAT = "strcat"
     ASSERT = "assert"
 
     ADD = "+"
@@ -113,28 +113,20 @@ class Symbol:
 
 Literal = int | float | str | bool
 Atom = Literal | Symbol | Builtin
-SExpr = Atom | Tuple[Atom, ...]
+SExpr = Atom | Tuple["SExpr", ...]
 
 
 @attr.s(auto_detect=True)
 class Lambda:
     params: Tuple[Symbol, ...] = attr.ib()
     body: SExpr = attr.ib()
-    scope: Dict[str, "Value"] = attr.ib()
+    scope: "Scope" = attr.ib()
 
     def __repr__(self):
         return f"<LAMBDA {print_expr(self.params)} => {print_expr(self.body)} scope={set(self.scope.keys())}>"
 
 
-@attr.s(auto_detect=True)
-class ListValue:
-    items: Tuple["Value", ...] = attr.ib()
-
-    def __repr__(self):
-        return "[" + " ".join(map(print_expr, self.items)) + "]"
-
-
-Value = Literal | Lambda | ListValue | Builtin
+Value = Literal | Lambda | Tuple["Value", ...] | Builtin
 
 
 def process_tokens(raw_tokens: List[tokenize.TokenInfo]) -> List[Token]:
@@ -223,36 +215,65 @@ def read_expr(s: str) -> SExpr:
     return parse(tokens)
 
 
-def eval_expr(expr: SExpr, scope: Optional[Dict[str, SExpr]] = None):
+class Reference:
+    def __init__(self, expr: Optional[SExpr] = None, scope: Optional["Scope"] = None, value: Optional[Value] = None):
+        self._expr = expr
+        self._scope = scope
+        self._value = value
+        assert value is not None or expr is not None, "either value or expression must be present"
+
+    def get(self) -> Value:
+        if self._value:
+            return self._value
+
+        self._value = eval_expr(self._expr, self._scope)
+        return self._value
+
+    @classmethod
+    def value(cls, value: Value) -> "Reference":
+        return cls(value=value)
+
+    @classmethod
+    def lazy(cls, expr: SExpr, scope: Optional["Scope"]) -> "Reference":
+        return cls(expr=expr, scope=scope)
+
+
+Scope = Dict[str, Reference]
+
+
+def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
     # TODO type checking
     if scope is None:
-        scope: Dict[str, Value] = {}
+        scope: Scope = {}
     match expr:
         case () | Builtin.NIL:
-            return ListValue(())
+            return tuple()
         case int() | float() | str() | bool():
             return expr
         case Builtin():
             return expr
         case Symbol(value=v):
-            return scope[v]
-        case (Builtin.IF, condition, if_true, if_false):
-            condition_result = eval_expr(condition, scope)
-            assert isinstance(condition_result, bool), f"if condition {print_expr(expr)} must be bool"
-            if condition_result:
-                return eval_expr(if_true, scope)
-            else:
-                return eval_expr(if_false, scope)
-        case (Builtin.LET, Symbol(value=v), sub_expr):
+            return scope[v].get()
+        case (Builtin.COND, *conditions):
+            for test, action in conditions:
+                test_result = eval_expr(test, scope)
+                assert isinstance(test_result, bool), f"condition {print_expr(test)} must be bool"
+                if test_result:
+                    return eval_expr(action, scope)
+            return tuple()
+        case (Builtin.SET, Symbol(value=v), sub_expr):
+            # TODO lazy?
             new_value = eval_expr(sub_expr, scope)
-            scope[v] = new_value
+            scope[v] = Reference.value(new_value)
             return new_value
+        case (Builtin.LET, name, value, body):
+            # TODO make this a macro / sugar
+            new_expr = ((Builtin.LAMBDA, (name,), body), value)
+            return eval_expr(new_expr, scope)
         case (Builtin.LAMBDA, tuple(params), body):
             return Lambda(params=params, body=body, scope=scope)
         case (Builtin.SEXPR, *body):
-            if len(body) != 1:
-                raise ValueError(f"`sexpr` accepts only one argument, got multuple: {print_expr(expr)}")
-            return ListValue(items=body)
+            return tuple(body)
         case (head, *args):
             head_eval = eval_expr(head, scope)
             match head_eval:
@@ -260,18 +281,18 @@ def eval_expr(expr: SExpr, scope: Optional[Dict[str, SExpr]] = None):
                     return apply_operator(head_eval, *[eval_expr(e, scope) for e in args])
                 case Lambda():
                     lambda_scope = dict(head_eval.scope)
-                    # TODO lazyiness
-                    bound_params = {param.value: eval_expr(param_expr, scope) for param, param_expr in
+                    bound_params = {param.value: Reference.lazy(expr=param_expr, scope=scope) for param, param_expr in
                                     zip(head_eval.params, args)}
+
                     lambda_scope.update(**bound_params)
                     return eval_expr(head_eval.body, scope=lambda_scope)
                 case _:
-                    raise ValueError(f"Head expression evaluated to non-callable: {head}")
+                    raise ValueError(f"Head expression evaluated to non-callable: {print_expr(head_eval)}")
         case _:
             raise ValueError(f"Failed to evaluate expression: {print_expr(expr)}")
 
 
-def apply_operator(op: Builtin, *args: Tuple[Value, ...]) -> Value:
+def apply_operator(op: Builtin, *args: Value) -> Value:
     match (op, *args):
         case (Builtin.ADD, *args):
             return sum(args)
@@ -284,7 +305,6 @@ def apply_operator(op: Builtin, *args: Tuple[Value, ...]) -> Value:
         case (Builtin.EQ, left, right):
             return left == right
         case (Builtin.LT, left, right):
-            print("ouch!")
             return left < right
         case (Builtin.LTE, left, right):
             return left <= right
@@ -292,6 +312,10 @@ def apply_operator(op: Builtin, *args: Tuple[Value, ...]) -> Value:
             return left > right
         case (Builtin.GTE, left, right):
             return left >= right
+        case (Builtin.READ, expr):
+            return read_expr(expr)
+        case (Builtin.EVAL, expr):
+            return eval_expr(expr)
         case (Builtin.PRINT, arg):
             return print_expr(arg)
         case (Builtin.STRCAT, *args):
@@ -304,15 +328,15 @@ def apply_operator(op: Builtin, *args: Tuple[Value, ...]) -> Value:
             return True
         # List ops
         case (Builtin.LIST, *args):
-            return ListValue(tuple(args))
-        case (Builtin.CONS, head, ListValue(items=tail)):
-            return ListValue((head, *tail))
-        case (Builtin.HEAD | Builtin.TAIL, ListValue(items=items)) if len(items) == 0:
+            return tuple(args)
+        case (Builtin.CONS, head, tail):
+            return head, *tail
+        case (Builtin.HEAD | Builtin.TAIL, ()):
             raise ValueError(f"Can't call {op} on empty list")
-        case (Builtin.HEAD, ListValue(items=(head, *_))):
+        case (Builtin.HEAD, (head, *_)):
             return head
-        case (Builtin.TAIL, ListValue(items=(_, *tail))):
-            return ListValue(tuple(tail))
+        case (Builtin.TAIL, (_, *tail)):
+            return tuple(tail)
         case _:
             raise ValueError(f"Failed to evaluate operator {print_expr((op, *args))}")
 
@@ -348,40 +372,47 @@ def reduce(fun: Callable[[U, T], U], items: List[T], initial: U) -> U:
 
 PREAMBLES = {
     "builtins": """
-        (let add (lambda (x y) (+ x y)))
-        (let mul (lambda (x y) (* x y)))
-        (let sub (lambda (x y) (- x y)))
-        (let neg (lambda (x) (- 0 x)))
-        (let div (lambda (x y) (/ x y)))
-        (let eq (lambda (x y) (= x y)))
-        (let printf (lambda (x) (print x))) 
+        (set add (lambda (x y) (+ x y)))
+        (set mul (lambda (x y) (* x y)))
+        (set sub (lambda (x y) (- x y)))
+        (set neg (lambda (x) (- 0 x)))
+        (set div (lambda (x y) (/ x y)))
+        (set eq (lambda (x y) (= x y)))
+        (set printf (lambda (x) (print x))) 
     """,
     "bools": """
-        (let and (lambda (a b) (if a b a)))
-        (let or (lambda (a b) (if a a b)))
-        (let not (lambda (a) (if a false true)))
+        (set if (lambda (condition if_true if_false) (cond (condition if_true) (true if_false))))
+        (set and (lambda (a b) (if a b a)))
+        (set or (lambda (a b) (if a a b)))
+        (set not (lambda (a) (if a false true)))
     """,
     "pairs": """
-        (let pair (lambda (x y) (lambda (z) (z x y))))
-        (let first (lambda (l) (l (lambda (x y) x)))) 
-        (let second (lambda (l) (l (lambda (x y) y))))
+        (set church_pair (lambda (x y) (lambda (z) (z x y))))
+        (set church_first (lambda (l) (l (lambda (x y) x)))) 
+        (set church_second (lambda (l) (l (lambda (x y) y))))
+    """,
+    "misc": """
+    (set comp (lambda (f g) (lambda (x) (f (g x)))))
+    (set fog comp)
     """,
     "list_ops": """
-        (let is_nil (lambda (l) (= l nil)))
-        (let fold (lambda (f l i) (if (is_nil l) i   (f (head l) (fold f (tail l) i)))))
-        (let map (lambda (f l)   (if (is_nil l) nil (cons (f (head l)) (map f (tail l))))))
-        (let map_val (lambda (i l) (map (lambda (_) i) l)))
-        (let len (lambda (l) (fold add (map_val 1 l) 0)))
-        (let cat (lambda (l1 l2) (if (is_nil l1) l2 (cons (head l1) (cat (tail l1) l2)))))
-        (let range (lambda (start end) (and (assert (<= start end) (print (list start "<=" end))) (if (= start end) nil (cons start (range (+ start 1) end))))))
-        (let flatten (lambda (l) (fold cat l nil)))
-        (let cartesian_prod (lambda (l1 l2) (flatten (map (lambda (a) (map (lambda (b) (list a b)) l2)) l1))))
+        (set is_nil (lambda (l) (= l nil)))
+        (set fold (lambda (f l i) (if (is_nil l) i   (f (head l) (fold f (tail l) i)))))
+        (set map (lambda (f l)   (if (is_nil l) nil (cons (f (head l)) (map f (tail l))))))
+        (set map_val (lambda (i l) (map (lambda (_) i) l)))
+        (set len (lambda (l) (fold add (map_val 1 l) 0)))
+        (set cat (lambda (l1 l2) (if (is_nil l1) l2 (cons (head l1) (cat (tail l1) l2)))))
+        (set range (lambda (start end) (and (assert (<= start end) (print (list start "<=" end))) (if (= start end) nil (cons start (range (+ start 1) end))))))
+        (set flatten (lambda (l) (fold cat l nil)))
+        (set cartesian_prod (lambda (l1 l2) (flatten (map (lambda (a) (map (lambda (b) (list a b)) l2)) l1))))
+        (set first head)
+        (set second (comp head tail))
     """,
 
 }
 
 
-def load_preamble(preamble: str, scope: Dict[str, Literal]):
+def load_preamble(preamble: str, scope: Scope):
     print(f"Loading preamble...")
     lines = [s.strip() for s in preamble.strip().split("\n")]
     for l in lines:
@@ -399,11 +430,11 @@ def main():
     import readline
     readline.read_init_file("./editrc")
 
-    scope = {}
+    scope: Scope = {}
 
     # load preambles
     # load_preamble(PREAMBLES["bools"], scope)
-    for name in ["bools", "pairs", "list_ops", "builtins"]:
+    for name in ["bools", "pairs", "builtins", "misc", "list_ops"]:
         preamble = PREAMBLES[name]
         print("Load preamble", name)
         load_preamble(preamble, scope)
