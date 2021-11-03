@@ -36,7 +36,7 @@ class LinkedList:
                 return Link(value, LinkedList.of(*rest))
 
     @classmethod
-    def from_iterable(cls, iterable: Iterable):
+    def from_iterable(cls, iterable: Iterable) -> "LinkedList":
         dummy = Link(None, Empty())
         current = dummy
         for x in iterable:
@@ -45,7 +45,7 @@ class LinkedList:
         return dummy.rest
 
     @classmethod
-    def linkify(cls, sexpr: Tuple | Any):
+    def linkify(cls, sexpr: Tuple | Any) -> Any | "LinkedList":
         match sexpr:
             case []:
                 return cls.empty()
@@ -217,7 +217,7 @@ class Lambda:
     body: SExpr = attr.ib()
     scope: "Scope" = attr.ib()
 
-    def eval(self, args: List[SExpr], calling_scope: "Scope") -> "Value":
+    def eval(self, args: Iterable[SExpr], calling_scope: "Scope") -> "Value":
         lambda_scope = dict(self.scope)
         bound_params = {param.value: Reference.lazy(arg, calling_scope) for param, arg in zip(self.params, args)}
         lambda_scope.update(**bound_params)
@@ -292,9 +292,9 @@ def tokenize_string(s: str) -> List[tokenize.TokenInfo]:
     return list(tokenize.tokenize(io.BytesIO(s.encode('utf-8')).readline))
 
 
-def parse(tokens: List[Token]) -> SExpr:
+def parse(tokens: List[Token]) -> SExpr | Tuple[SExpr, ...]:
     level = 0
-    expressions: List[List[SExpr]] = []
+    expressions: List[List[SExpr | Tuple]] = []
 
     for t in tokens:
         match t:
@@ -322,7 +322,9 @@ def parse(tokens: List[Token]) -> SExpr:
 def read_expr(s: str) -> SExpr:
     raw_tokens = tokenize_string(s)
     tokens = process_tokens(raw_tokens)
-    return parse(tokens)
+    expr_tuple = parse(tokens)
+    return LinkedList.linkify(expr_tuple
+                              )
 
 
 class Reference:
@@ -358,37 +360,38 @@ def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
     match expr:
         case () | Empty() | Builtin.NIL:
             return Empty()
-        case int() | float() | str() | bool():
-            return expr
-        case Builtin():
+        case int() | float() | str() | bool() | Builtin():
             return expr
         case Symbol(value=v):
             return scope[v].get()
-        case (Builtin.COND, *conditions):
+        case Link(value=Builtin.COND, rest=conditions):
             for test, action in conditions:
                 test_result = eval_expr(test, scope)
                 assert isinstance(test_result, bool), f"condition {print_expr(test)} must be bool"
                 if test_result:
                     return eval_expr(action, scope)
-            return tuple()
-        case (Builtin.SET, Symbol(value=v), sub_expr):
-            # TODO lazy?
+            return Empty()
+        case Link(value=Builtin.SET, rest=args):
+            symbol, sub_expr = args
             new_value = eval_expr(sub_expr, scope)
-            scope[v] = Reference.value(new_value)
+            scope[symbol.value] = Reference.value(new_value)
             return new_value
-        case (Builtin.LET, name, value, body):
+        case Link(value=Builtin.LET, rest=args):
+            name, value, body = args
             # TODO make this a macro / sugar
             new_expr = LinkedList.linkify(((Builtin.LAMBDA, (name,), body), value))
             return eval_expr(new_expr, scope)
-        case (Builtin.LAMBDA, tuple(params), body):
-            return Lambda(params=params, body=body, scope=scope)
-        case (Builtin.MACRO, tuple(params), body):
-            return Macro(params=params, body=body, scope=scope)
-        case (Builtin.SEXPR, *body):
-            return tuple(body)
-        case (Builtin.QUOTE, body):
+        case Link(value=Builtin.LAMBDA, rest=args):
+            params, body = args
+            return Lambda(params=tuple(params), body=body, scope=scope)
+        case Link(value=Builtin.LAMBDA, rest=args):
+            params, body = args
+            return Macro(params=tuple(params), body=body, scope=scope)
+        case Link(value=Builtin.SEXPR, rest=body):
             return body
-        case (head, *args):
+        case Link(value=Builtin.QUOTE, rest=Link(value=body, rest=Empty())):
+            return body
+        case Link(value=head, rest=args):
             head_eval = eval_expr(head, scope)
             match head_eval:
                 case Builtin():
