@@ -12,6 +12,99 @@ from typing import List, Generator, Iterable, Any, Optional, Tuple, Dict, TypeVa
 import attr
 
 
+class LinkedList:
+
+    def __eq__(self, other):
+        match (self, other):
+            case Empty(), Empty():
+                return True
+            case Link(v1, r1), Link(v2, r2):
+                return v1 == v2 and r1 == r2
+            case _:
+                return False
+
+    def __len__(self):
+        # NOTE! Can be expensive, traverses whole list
+        return sum(1 for _ in self)
+
+    @classmethod
+    def of(cls, *args):
+        match args:
+            case ():
+                return Empty()
+            case (value, *rest):
+                return Link(value, LinkedList.of(*rest))
+
+    @classmethod
+    def from_iterable(cls, iterable: Iterable):
+        dummy = Link(None, Empty())
+        current = dummy
+        for x in iterable:
+            current.rest = Link(x, Empty())
+            current = current.rest
+        return dummy.rest
+
+    @classmethod
+    def linkify(cls, sexpr: Tuple | Any):
+        match sexpr:
+            case []:
+                return cls.empty()
+            case (_, *_):
+                return cls.of(*map(cls.linkify, sexpr))
+            case _:
+                return sexpr
+
+    @classmethod
+    def tuplify(cls, sexpr: Any | "LinkedList"):
+        match sexpr:
+            case cls():
+                return tuple(map(cls.tuplify, sexpr))
+            case _:
+                return sexpr
+
+
+    @classmethod
+    def empty(cls):
+        return Empty()
+
+    def __iter__(self):
+        match self:
+            case Empty():
+                return
+            case Link(value, rest):
+                yield value
+                yield from rest
+
+
+class Empty(LinkedList):
+    def __str__(self):
+        return "()"
+
+
+@attr.s(auto_detect=True)
+class Link(LinkedList):
+    __match_args__ = ("value", "rest")
+    value = attr.ib()
+    rest: LinkedList = attr.ib()
+
+    def __str__(self):
+        return f"({self.value} => {self.rest})"
+
+
+@attr.s
+class Dialect:
+    parser = attr.ib()
+    builtins = attr.ib()
+    interpreter = attr.ib()
+
+
+@attr.s
+class Language(Dialect):
+    army = attr.ib()
+    navy = attr.ib()
+    # hyuk hyuk
+
+
 class TokenType(enum.Enum):
     OPEN_PAREN = enum.auto()
     CLOSE_PAREN = enum.auto()
@@ -27,10 +120,8 @@ class Builtin(enum.Enum):
     LET = "let"
     SET = "set"
     LAMBDA = "lambda"
+    MACRO = "macro"
     COND = "cond"
-    # AND = "and"
-    # OR = "or"
-    # NOT = "not"
 
     # List ops
     NIL = "nil"
@@ -40,12 +131,16 @@ class Builtin(enum.Enum):
     CONS = "cons"
     # sexpr
     SEXPR = "sexpr"
+    QUOTE = "quote"
+    SYMBOL = "symbol"
 
     READ = "read"
     EVAL = "eval"
     PRINT = "print"
 
+    TYPEID = "typeid"
     STRCAT = "strcat"
+    STRFMT = "strfmt"
     ASSERT = "assert"
 
     ADD = "+"
@@ -113,7 +208,7 @@ class Symbol:
 
 Literal = int | float | str | bool
 Atom = Literal | Symbol | Builtin
-SExpr = Atom | Tuple["SExpr", ...]
+SExpr = Atom | LinkedList
 
 
 @attr.s(auto_detect=True)
@@ -122,11 +217,26 @@ class Lambda:
     body: SExpr = attr.ib()
     scope: "Scope" = attr.ib()
 
+    def eval(self, args: List[SExpr], calling_scope: "Scope") -> "Value":
+        lambda_scope = dict(self.scope)
+        bound_params = {param.value: Reference.lazy(arg, calling_scope) for param, arg in zip(self.params, args)}
+        lambda_scope.update(**bound_params)
+        return eval_expr(self.body, scope=lambda_scope)
+
     def __repr__(self):
-        return f"<LAMBDA {print_expr(self.params)} => {print_expr(self.body)} scope={set(self.scope.keys())}>"
+        return f"<{self.__class__.__name__.upper()} {print_expr(self.params)} => {print_expr(self.body)} scope={set(self.scope.keys())}>"
 
 
-Value = Literal | Lambda | Tuple["Value", ...] | Builtin
+class Macro(Lambda):
+    def eval(self, args: List[SExpr], calling_scope: "Scope") -> "Value":
+        lambda_scope = dict(self.scope)
+        bound_params = {param.value: Reference.value(arg) for param, arg in zip(self.params, args)}
+        lambda_scope.update(**bound_params)
+        resulting_expression = eval_expr(self.body, scope=lambda_scope)
+        return eval_expr(resulting_expression, scope=calling_scope)
+
+
+Value = Literal | Lambda | Builtin | LinkedList
 
 
 def process_tokens(raw_tokens: List[tokenize.TokenInfo]) -> List[Token]:
@@ -246,8 +356,8 @@ def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
     if scope is None:
         scope: Scope = {}
     match expr:
-        case () | Builtin.NIL:
-            return tuple()
+        case () | Empty() | Builtin.NIL:
+            return Empty()
         case int() | float() | str() | bool():
             return expr
         case Builtin():
@@ -268,24 +378,23 @@ def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
             return new_value
         case (Builtin.LET, name, value, body):
             # TODO make this a macro / sugar
-            new_expr = ((Builtin.LAMBDA, (name,), body), value)
+            new_expr = LinkedList.linkify(((Builtin.LAMBDA, (name,), body), value))
             return eval_expr(new_expr, scope)
         case (Builtin.LAMBDA, tuple(params), body):
             return Lambda(params=params, body=body, scope=scope)
+        case (Builtin.MACRO, tuple(params), body):
+            return Macro(params=params, body=body, scope=scope)
         case (Builtin.SEXPR, *body):
             return tuple(body)
+        case (Builtin.QUOTE, body):
+            return body
         case (head, *args):
             head_eval = eval_expr(head, scope)
             match head_eval:
                 case Builtin():
                     return apply_operator(head_eval, *[eval_expr(e, scope) for e in args])
                 case Lambda():
-                    lambda_scope = dict(head_eval.scope)
-                    bound_params = {param.value: Reference.lazy(expr=param_expr, scope=scope) for param, param_expr in
-                                    zip(head_eval.params, args)}
-
-                    lambda_scope.update(**bound_params)
-                    return eval_expr(head_eval.body, scope=lambda_scope)
+                    return head_eval.eval(args, calling_scope=scope)
                 case _:
                     raise ValueError(f"Head expression evaluated to non-callable: {print_expr(head_eval)}")
         case _:
@@ -320,28 +429,34 @@ def apply_operator(op: Builtin, *args: Value) -> Value:
             return print_expr(arg)
         case (Builtin.STRCAT, *args):
             return "".join(args)
+        case (Builtin.STRFMT, s, *args):
+            return s % tuple(args)
         case (Builtin.ASSERT, condition):
             assert condition
             return True
         case (Builtin.ASSERT, condition, message):
             assert condition, message
             return True
+        case (Builtin.TYPEID, arg):
+            return type(arg).__name__.lower()
+        case (Builtin.SYMBOL, s):
+            return isinstance(s, Symbol)
         # List ops
         case (Builtin.LIST, *args):
-            return tuple(args)
+            return LinkedList.of(*args)
         case (Builtin.CONS, head, tail):
-            return head, *tail
-        case (Builtin.HEAD | Builtin.TAIL, ()):
+            return Link(head, tail)
+        case (Builtin.HEAD | Builtin.TAIL, Empty()):
             raise ValueError(f"Can't call {op} on empty list")
-        case (Builtin.HEAD, (head, *_)):
+        case (Builtin.HEAD, Link(head, _)):
             return head
-        case (Builtin.TAIL, (_, *tail)):
-            return tuple(tail)
+        case (Builtin.TAIL, Link(_, tail)):
+            return tail
         case _:
             raise ValueError(f"Failed to evaluate operator {print_expr((op, *args))}")
 
 
-def print_expr(expr: SExpr) -> str:
+def print_expr(expr: SExpr | Tuple[SExpr, ...]) -> str:
     match expr:
         case int() | float() | bool():
             return str(expr).lower()
@@ -353,7 +468,7 @@ def print_expr(expr: SExpr) -> str:
             return repr(expr)
         case Lambda():
             return repr(expr)
-        case tuple():
+        case tuple() | LinkedList():
             return "(" + " ".join(print_expr(e) for e in expr) + ")"
         case _:
             return repr(expr)
