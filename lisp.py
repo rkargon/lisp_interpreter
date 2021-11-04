@@ -1,94 +1,16 @@
 #!/usr/bin/env python3
 
-# TODO parser-combinators?
 import ast
 import enum
 import io
 import pprint
 import tokenize
 import traceback
-from typing import List, Generator, Iterable, Any, Optional, Tuple, Dict, TypeVar, Callable
+from typing import List, Iterable, Any, Optional, Tuple, Dict, TypeVar, Callable
 
 import attr
 
-
-class LinkedList:
-
-    def __eq__(self, other):
-        match (self, other):
-            case Empty(), Empty():
-                return True
-            case Link(v1, r1), Link(v2, r2):
-                return v1 == v2 and r1 == r2
-            case _:
-                return False
-
-    def __len__(self):
-        # NOTE! Can be expensive, traverses whole list
-        return sum(1 for _ in self)
-
-    @classmethod
-    def of(cls, *args):
-        match args:
-            case ():
-                return Empty()
-            case (value, *rest):
-                return Link(value, LinkedList.of(*rest))
-
-    @classmethod
-    def from_iterable(cls, iterable: Iterable) -> "LinkedList":
-        dummy = Link(None, Empty())
-        current = dummy
-        for x in iterable:
-            current.rest = Link(x, Empty())
-            current = current.rest
-        return dummy.rest
-
-    @classmethod
-    def linkify(cls, sexpr: Tuple | Any) -> Any | "LinkedList":
-        match sexpr:
-            case []:
-                return cls.empty()
-            case (_, *_):
-                return cls.of(*map(cls.linkify, sexpr))
-            case _:
-                return sexpr
-
-    @classmethod
-    def tuplify(cls, sexpr: Any | "LinkedList"):
-        match sexpr:
-            case cls():
-                return tuple(map(cls.tuplify, sexpr))
-            case _:
-                return sexpr
-
-
-    @classmethod
-    def empty(cls):
-        return Empty()
-
-    def __iter__(self):
-        match self:
-            case Empty():
-                return
-            case Link(value, rest):
-                yield value
-                yield from rest
-
-
-class Empty(LinkedList):
-    def __str__(self):
-        return "()"
-
-
-@attr.s(auto_detect=True)
-class Link(LinkedList):
-    __match_args__ = ("value", "rest")
-    value = attr.ib()
-    rest: LinkedList = attr.ib()
-
-    def __str__(self):
-        return f"({self.value} => {self.rest})"
+from util import LinkedList, Link, Empty
 
 
 @attr.s
@@ -105,15 +27,7 @@ class Language(Dialect):
     # hyuk hyuk
 
 
-class TokenType(enum.Enum):
-    OPEN_PAREN = enum.auto()
-    CLOSE_PAREN = enum.auto()
-    BOOL = enum.auto()
-    INTEGER = enum.auto()
-    FLOAT = enum.auto()
-    STRING = enum.auto()
-    SYMBOL = enum.auto()
-    BUILTIN = enum.auto()
+
 
 
 class Builtin(enum.Enum):
@@ -192,11 +106,6 @@ class Builtin(enum.Enum):
         return self.value
 
 
-@attr.s
-class Token:
-    type_: TokenType = attr.ib()
-    value: Any = attr.ib()
-
 
 class Symbol:
     def __init__(self, value: str):
@@ -237,59 +146,6 @@ class Macro(Lambda):
 
 
 Value = Literal | Lambda | Builtin | LinkedList
-
-
-def process_tokens(raw_tokens: List[tokenize.TokenInfo]) -> List[Token]:
-    return list(filter(None, map(match_token, raw_tokens)))
-
-
-OPERATOR_SYMBOLS = [
-    tokenize.PLUS,
-    tokenize.MINUS,
-    tokenize.STAR,
-    tokenize.SLASH,
-    tokenize.EQEQUAL,
-    tokenize.NOTEQUAL,
-    tokenize.EQUAL,
-    tokenize.LESS,
-    tokenize.GREATER,
-    tokenize.LESSEQUAL,
-    tokenize.GREATEREQUAL,
-
-]
-
-
-def match_token(token: tokenize.TokenInfo) -> Optional[Token]:
-    match (token.exact_type, token.string):
-        case (tokenize.LPAR, "("):
-            return Token(TokenType.OPEN_PAREN, None)
-        case (tokenize.RPAR, ")"):
-            return Token(TokenType.CLOSE_PAREN, None)
-        case (tokenize.NUMBER, number_string):
-            try:
-                n = int(number_string)
-                return Token(TokenType.INTEGER, n)
-            except ValueError:
-                n = float(number_string)
-                return Token(TokenType.FLOAT, n)
-        case (tokenize.NUMBER, float(n)):
-            return Token(TokenType.FLOAT, n)
-        case (tokenize.STRING, s):
-            return Token(TokenType.STRING, ast.literal_eval(s))
-        case (tokenize.NAME, "true" | "false" as s):
-            return Token(TokenType.BOOL, bool(s == "true"))
-        case (tokenize.NAME, s) if Builtin.is_builtin(s):
-            return Token(TokenType.BUILTIN, Builtin(s))
-        case (tokenize.NAME, s):
-            return Token(TokenType.SYMBOL, Symbol(s))
-        case (t, op) if t in OPERATOR_SYMBOLS and Builtin.is_builtin(op):
-            return Token(TokenType.BUILTIN, Builtin(op))
-        case _:
-            return None
-
-
-def tokenize_string(s: str) -> List[tokenize.TokenInfo]:
-    return list(tokenize.tokenize(io.BytesIO(s.encode('utf-8')).readline))
 
 
 def parse(tokens: List[Token]) -> SExpr | Tuple[SExpr, ...]:
