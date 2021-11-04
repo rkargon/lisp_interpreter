@@ -107,13 +107,6 @@ class Builtin(enum.Enum):
 
 
 
-class Symbol:
-    def __init__(self, value: str):
-        self.value = value
-
-    def __repr__(self):
-        return self.value
-
 
 Literal = int | float | str | bool
 Atom = Literal | Symbol | Builtin
