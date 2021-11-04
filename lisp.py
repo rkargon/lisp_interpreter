@@ -384,7 +384,7 @@ def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
         case Link(value=Builtin.LAMBDA, rest=args):
             params, body = args
             return Lambda(params=tuple(params), body=body, scope=scope)
-        case Link(value=Builtin.LAMBDA, rest=args):
+        case Link(value=Builtin.MACRO, rest=args):
             params, body = args
             return Macro(params=tuple(params), body=body, scope=scope)
         case Link(value=Builtin.SEXPR, rest=body):
