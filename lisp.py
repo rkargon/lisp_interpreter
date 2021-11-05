@@ -27,9 +27,6 @@ class Language(Dialect):
     # hyuk hyuk
 
 
-
-
-
 class Builtin(enum.Enum):
     LET = "let"
     SET = "set"
@@ -104,8 +101,6 @@ class Builtin(enum.Enum):
 
     def __repr__(self):
         return self.value
-
-
 
 
 Literal = int | float | str | bool
@@ -337,49 +332,8 @@ def reduce(fun: Callable[[U, T], U], items: List[T], initial: U) -> U:
     return result
 
 
-PREAMBLES = {
-    "builtins": """
-        (set add (lambda (x y) (+ x y)))
-        (set mul (lambda (x y) (* x y)))
-        (set sub (lambda (x y) (- x y)))
-        (set neg (lambda (x) (- 0 x)))
-        (set div (lambda (x y) (/ x y)))
-        (set eq (lambda (x y) (= x y)))
-        (set printf (lambda (x) (print x))) 
-    """,
-    "bools": """
-        (set if (lambda (condition if_true if_false) (cond (condition if_true) (true if_false))))
-        (set and (lambda (a b) (if a b a)))
-        (set or (lambda (a b) (if a a b)))
-        (set not (lambda (a) (if a false true)))
-    """,
-    "pairs": """
-        (set church_pair (lambda (x y) (lambda (z) (z x y))))
-        (set church_first (lambda (l) (l (lambda (x y) x)))) 
-        (set church_second (lambda (l) (l (lambda (x y) y))))
-    """,
-    "misc": """
-    (set comp (lambda (f g) (lambda (x) (f (g x)))))
-    (set fog comp)
-    """,
-    "list_ops": """
-        (set is_nil (lambda (l) (= l nil)))
-        (set fold (lambda (f l i) (if (is_nil l) i   (f (head l) (fold f (tail l) i)))))
-        (set map (lambda (f l)   (if (is_nil l) nil (cons (f (head l)) (map f (tail l))))))
-        (set map_val (lambda (i l) (map (lambda (_) i) l)))
-        (set len (lambda (l) (fold add (map_val 1 l) 0)))
-        (set cat (lambda (l1 l2) (if (is_nil l1) l2 (cons (head l1) (cat (tail l1) l2)))))
-        (set range (lambda (start end) (and (assert (<= start end) (print (list start "<=" end))) (if (= start end) nil (cons start (range (+ start 1) end))))))
-        (set flatten (lambda (l) (fold cat l nil)))
-        (set cartesian_prod (lambda (l1 l2) (flatten (map (lambda (a) (map (lambda (b) (list a b)) l2)) l1))))
-        (set first head)
-        (set second (comp head tail))
-    """,
-
-}
-
-
-def load_preamble(preamble: str, scope: Scope):
+def load_file(filename: str, scope: Scope):
+    return
     print(f"Loading preamble...")
     lines = [s.strip() for s in preamble.strip().split("\n")]
     for l in lines:
@@ -398,13 +352,7 @@ def main():
     readline.read_init_file("./editrc")
 
     scope: Scope = {}
-
-    # load preambles
-    # load_preamble(PREAMBLES["bools"], scope)
-    for name in ["bools", "pairs", "builtins", "misc", "list_ops"]:
-        preamble = PREAMBLES[name]
-        print("Load preamble", name)
-        load_preamble(preamble, scope)
+    load_file("./samples/stdlib.lisp")
 
     while True:
         string = input("> ")
@@ -414,8 +362,8 @@ def main():
             # parse special commands
             if string.startswith("!"):
                 match string.split():
-                    case "!preamble", name:
-                        load_preamble(PREAMBLES[name], scope)
+                    case "!load", *name:
+                        load_file(name, scope)
                     case ["!scope"]:
                         pprint.pprint(scope, indent=4)
                     case ["!scope", *expr]:

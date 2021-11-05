@@ -2,7 +2,8 @@ import ast
 import enum
 import io
 import tokenize as tknz
-from typing import List, Optional, Generic, TypeVar, Any, Set
+from abc import abstractmethod
+from typing import List, Optional, TypeVar, Set, Iterable, Any
 
 import attr
 
@@ -22,78 +23,71 @@ _TT = TypeVar("_TT")
 
 
 @attr.s
-class Token(Generic[_TT]):
-    type_: _TT = attr.ib()
-    value: Any = attr.ib()
+class Token:
+    type_: TokenType = attr.ib()
+    value: str = attr.ib()
 
 
+@attr.s(auto_detect=True)
 class Builtin:
-    def __init__(self, value: str):
-        self.value = value
+    value: str = attr.ib()
 
     def __repr__(self):
         return self.value
 
-    def __eq__(self, other):
-        match other:
-            case Builtin(v):
-                return v == self.value
-            case _:
-                return False
 
-
+@attr.s(auto_detect=True)
 class Symbol:
-    def __init__(self, value: str):
-        self.value = value
+    value: str = attr.ib()
 
     def __repr__(self):
         return self.value
 
 
-class Tokenizer(Generic[_TT]):
-    def tokenize(self, string: str) -> List[Token[_TT]]:
+class Tokenizer:
+    def tokenize(self, string: str) -> List[Token]:
         pass
 
 
-class DefaultPythonTokenizer(Tokenizer[TokenType]):
+class DefaultPythonTokenizer(Tokenizer):
     """
     Relies on Python's built-in tokenizer. As such, requires that tokens match Python's syntax.
-    i.e. tokens can be strings, numbers, valid pthon builtin/variable names, etc.
+    i.e. tokens can be strings, numbers, valid python builtin/variable names, etc.
     """
 
-    def __init__(self, builtins: Set[Builtin]):
-        self._builtins: Set[Builtin] = set(builtins)
+    def __init__(self, builtins: Set[str]):
+        self._builtins: Set[str] = set(builtins)
 
-    def tokenize(self, string: str) -> List[Token[TokenType]]:
+    def tokenize(self, string: str) -> List[Token]:
         python_tokens = self._python_tokenize_string(string)
         tokens = list(filter(None, (self._match_python_token(tok) for tok in python_tokens)))
         return tokens
 
-    def _match_python_token(self, token: tknz.TokenInfo) -> Optional[Token[TokenType]]:
+    def _match_python_token(self, token: tknz.TokenInfo) -> Optional[Token]:
         match (token.exact_type, token.string):
             case (tknz.LPAR, "("):
-                return Token(TokenType.OPEN_PAREN, None)
+                return Token(TokenType.OPEN_PAREN, "(")
             case (tknz.RPAR, ")"):
-                return Token(TokenType.CLOSE_PAREN, None)
+                return Token(TokenType.CLOSE_PAREN, "(")
             case (tknz.NUMBER, number_string):
                 try:
                     n = int(number_string)
-                    return Token(TokenType.INTEGER, n)
+                    return Token(TokenType.INTEGER, number_string)
                 except ValueError:
                     n = float(number_string)
-                    return Token(TokenType.FLOAT, n)
+                    return Token(TokenType.FLOAT, number_string)
             case (tknz.NUMBER, float(n)):
                 return Token(TokenType.FLOAT, n)
             case (tknz.STRING, s):
                 return Token(TokenType.STRING, ast.literal_eval(s))
             case (tknz.NAME, "true" | "false" as s):
-                return Token(TokenType.BOOL, bool(s == "true"))
-            case (tknz.NAME, s) if Builtin(s) in self._builtins:
-                return Token(TokenType.BUILTIN, Builtin(s))
+                return Token(TokenType.BOOL, s)
+            case (tknz.NAME, s) if s in self._builtins:
+                return Token(TokenType.BUILTIN, s)
             case (tknz.NAME, s):
-                return Token(TokenType.SYMBOL, Symbol(s))
-            case (t, op) if t in OPERATOR_SYMBOLS and Builtin(s) in self._builtins:
-                return Token(TokenType.BUILTIN, Builtin(op))
+                return Token(TokenType.SYMBOL, s)
+            case (_, op) if op in self._builtins:
+                return Token(TokenType.BUILTIN, op)
             case _:
                 return None
 
@@ -101,16 +95,63 @@ class DefaultPythonTokenizer(Tokenizer[TokenType]):
         return list(tknz.tokenize(io.BytesIO(string.encode('utf-8')).readline))
 
 
-OPERATOR_SYMBOLS = [
-    tknz.PLUS,
-    tknz.MINUS,
-    tknz.STAR,
-    tknz.SLASH,
-    tknz.EQEQUAL,
-    tknz.NOTEQUAL,
-    tknz.EQUAL,
-    tknz.LESS,
-    tknz.GREATER,
-    tknz.LESSEQUAL,
-    tknz.GREATEREQUAL,
-]
+@attr.s
+class Parser:
+    tokenizer: Tokenizer = attr.ib()
+
+    def parse(self, s: str):
+        tokens = self.tokenizer.tokenize(s)
+        return self._parse_tokens(tokens)
+
+    @abstractmethod
+    def _parse_tokens(self, tokens: Iterable[Token]):
+        raise NotImplementedError()
+
+
+class LispParser(Parser):
+    def __init__(self, builtins: Set[str]):
+        self._builtins: Set[str] = builtins
+        self.tokenizer: Tokenizer = DefaultPythonTokenizer(self._builtins)
+
+    def _parse_tokens(self, tokens: Iterable[Token]):
+        level = 0
+        expressions: List[List[SExpr | Tuple]] = []
+
+        for t in tokens:
+            match t:
+                case Token(type_=TokenType.OPEN_PAREN):
+                    level += 1
+                    expressions.append([])
+                case Token(
+                    type_=(TokenType.STRING | TokenType.FLOAT | TokenType.INTEGER | TokenType.BOOL | TokenType.SYMBOL | TokenType.BUILTIN),
+                    value=v):
+                    parsed_value = self._parse_value(t.type_, v)
+                    if level == 0:
+                        return parsed_value
+                    expressions[-1].append(parsed_value)
+                case Token(type_=TokenType.CLOSE_PAREN):
+                    level -= 1
+                    expr = tuple(expressions.pop())
+                    if level == 0:
+                        return expr
+                    if level < 0:
+                        raise RuntimeError("Mismatched parens!")
+                    expressions[-1].append(expr)
+                case _:
+                    raise ValueError(f"Unexpected token: {t}")
+
+    @classmethod
+    def _parse_value(cls, type_: TokenType, value: str) -> Any:
+        match type_:
+            case TokenType.STRING:
+                return value
+            case TokenType.FLOAT:
+                return float(value)
+            case TokenType.INTEGER:
+                return int(value)
+            case TokenType.BOOL:
+                return value == "true"
+            case TokenType.SYMBOL:
+                return Symbol(value)
+            case TokenType.BUILTIN:
+                return Builtin(value)
