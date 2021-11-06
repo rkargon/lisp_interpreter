@@ -1,33 +1,60 @@
 #!/usr/bin/env python3
 
-import ast
 import enum
-import io
-import pprint
-import tokenize
-import traceback
-from typing import List, Iterable, Any, Optional, Tuple, Dict, TypeVar, Callable
+from abc import abstractmethod
+from typing import List, Iterable, Optional, Tuple, Dict, Callable, Set
 
 import attr
 
+import util
+from parser import SExpr, Symbol, Builtin, print_sexpr, LispParser
 from util import LinkedList, Link, Empty
 
 
-@attr.s
-class Dialect:
-    parser = attr.ib()
-    builtins = attr.ib()
-    interpreter = attr.ib()
+Scope = Dict[str, "Reference"]
 
 
-@attr.s
-class Language(Dialect):
-    army = attr.ib()
-    navy = attr.ib()
-    # hyuk hyuk
+class Interpreter:
+
+    @abstractmethod
+    def init(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def read(self, string: str) -> Optional[SExpr]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def eval(self, expr: SExpr) -> SExpr:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def print(self, expr: SExpr) -> str:
+        raise NotImplementedError()
+
+    def repl(self, string: str) -> Optional[str]:
+        expr = self.read(string)
+        if expr is None:
+            return None
+        return self.print(self.eval(expr))
+
+    @classmethod
+    def quick_eval(cls, string: str, **kwargs):
+        interpreter = cls(**kwargs)
+        interpreter.init()
+        return interpreter.repl(string)
+
+    def load_file(self, filename: str):
+        with open(filename, "r") as f:
+            for l in f.readlines():
+                lstrip = l.strip()
+                if not lstrip:
+                    continue
+                print("> ", lstrip)
+                self.repl(lstrip)
 
 
-class Builtin(enum.Enum):
+class Builtins(Builtin, enum.Enum):
     LET = "let"
     SET = "set"
     LAMBDA = "lambda"
@@ -65,47 +92,137 @@ class Builtin(enum.Enum):
     GT = ">"
     GTE = ">="
 
-    # TODO: define other relational operations in terms of these
 
-    @classmethod
-    def is_builtin(cls, k: str) -> bool:
-        try:
-            Builtin(k)
-            return True
-        except ValueError:
-            return False
+class LispInterpreter(Interpreter):
 
-    @classmethod
-    def operators(cls) -> List["Builtin"]:
-        return [
-            Builtin.STRCAT,
-            Builtin.PRINT,
-            Builtin.ASSERT,
-            #
-            Builtin.ADD,
-            Builtin.SUB,
-            Builtin.MUL,
-            Builtin.DIV,
-            Builtin.EQ,
-            Builtin.NEQ,
-            Builtin.LT,
-            Builtin.LTE,
-            Builtin.GT,
-            Builtin.GTE,
-            #
-            Builtin.LIST,
-            Builtin.CONS,
-            Builtin.HEAD,
-            Builtin.TAIL,
-        ]
+    def __init__(self, builtins: Optional[Set[str]] = None):
+        if builtins is None:
+            builtins = set(x.keyword for x in Builtins)
+        self.parser = LispParser(builtins)
+        self.scope: Scope = {}
 
-    def __repr__(self):
-        return self.value
+    def init(self):
+        self.scope = {}
 
+    def read(self, string: str) -> SExpr:
+        return self.parser.parse(string)
 
-Literal = int | float | str | bool
-Atom = Literal | Symbol | Builtin
-SExpr = Atom | LinkedList
+    def eval(self, expr: SExpr) -> SExpr:
+        return self._eval_with_scope(expr, self.scope)
+
+    def _eval_with_scope(self, expr: SExpr, scope: Scope):
+        match expr:
+            case () | Empty() | Builtins.NIL:
+                return Empty()
+            case int() | float() | str() | bool() | Builtin():
+                return expr
+            case Symbol(value=v):
+                return scope[v].get()
+            case Link(value=Builtins.COND, rest=conditions):
+                for test, action in conditions:
+                    test_result = self._eval_with_scope(test, scope)
+                    assert isinstance(test_result, bool), f"condition {self.print(test)} must be bool"
+                    if test_result:
+                        return self._eval_with_scope(action, scope)
+                return Empty()
+            case Link(value=Builtins.SET, rest=args):
+                symbol, sub_expr = args
+                new_value = self._eval_with_scope(sub_expr, scope)
+                scope[symbol.value] = Reference.value(new_value)
+                return new_value
+            case Link(value=Builtins.LET, rest=args):
+                name, value, body = args
+                # TODO make this a macro / sugar
+                new_expr = LinkedList.linkify(((Builtins.LAMBDA, (name,), body), value))
+                return self._eval_with_scope(new_expr, scope)
+            case Link(value=Builtins.LAMBDA, rest=args):
+                params, body = args
+                return Lambda(params=tuple(params), body=body, scope=scope)
+            case Link(value=Builtins.MACRO, rest=args):
+                params, body = args
+                return Macro(params=tuple(params), body=body, scope=scope)
+            case Link(value=Builtins.SEXPR, rest=body):
+                return body
+            case Link(value=Builtins.QUOTE, rest=Link(value=body, rest=Empty())):
+                return body
+            case Link(value=head, rest=args):
+                head_eval = self._eval_with_scope(head, scope)
+                match head_eval:
+                    case Builtin():
+                        return self._apply_operator(head_eval, *[self._eval_with_scope(e, scope) for e in args])
+                    case Macro():
+                        lambda_scope = dict(head_eval.scope)
+                        bound_params = {param.value: Reference.value(arg) for param, arg in zip(head_eval.params, args)}
+                        lambda_scope.update(**bound_params)
+                        resulting_expression = self._eval_with_scope(head_eval.body, scope=lambda_scope)
+                        return self._eval_with_scope(resulting_expression, scope=scope)
+                    case Lambda():
+                        lambda_scope = dict(head_eval.scope)
+                        bound_params = {param.value: Reference.lazy(lambda a=arg: self._eval_with_scope(a, scope)) for
+                                        param, arg in zip(head_eval.params, args)}
+                        lambda_scope.update(**bound_params)
+                        return self._eval_with_scope(head_eval.body, scope=lambda_scope)
+                    case _:
+                        raise ValueError(f"Head expression evaluated to non-callable: {self.print(head_eval)}")
+            case _:
+                raise ValueError(f"Failed to evaluate expression: {self.print(expr)}")
+
+    def _apply_operator(self, op: Builtin, *args: SExpr) -> SExpr:
+        match (op, *args):
+            case (Builtins.ADD, *args):
+                return sum(args)
+            case (Builtins.SUB, first, second):
+                return first - second
+            case (Builtins.MUL, *args):
+                return util.reduce(lambda x, y: x * y, args, initial=1)
+            case (Builtins.DIV, dividend, divisor):
+                return dividend / divisor
+            case (Builtins.EQ, left, right):
+                return left == right
+            case (Builtins.LT, left, right):
+                return left < right
+            case (Builtins.LTE, left, right):
+                return left <= right
+            case (Builtins.GT, left, right):
+                return left > right
+            case (Builtins.GTE, left, right):
+                return left >= right
+            case (Builtins.READ, expr):
+                return self.read(expr)
+            case (Builtins.EVAL, expr):
+                return self.eval(expr)
+            case (Builtins.PRINT, arg):
+                return self.print(arg)
+            case (Builtins.STRCAT, *args):
+                return "".join(args)
+            case (Builtins.STRFMT, s, *args):
+                return s % tuple(args)
+            case (Builtins.ASSERT, condition):
+                assert condition
+                return True
+            case (Builtins.ASSERT, condition, message):
+                assert condition, message
+                return True
+            case (Builtins.TYPEID, arg):
+                return type(arg).__name__.lower()
+            case (Builtins.SYMBOL, s):
+                return isinstance(s, Symbol)
+            # List ops
+            case (Builtins.LIST, *args):
+                return LinkedList.of(*args)
+            case (Builtins.CONS, head, tail):
+                return Link(head, tail)
+            case (Builtins.HEAD | Builtins.TAIL, Empty()):
+                raise ValueError(f"Can't call {op} on empty list")
+            case (Builtins.HEAD, Link(head, _)):
+                return head
+            case (Builtins.TAIL, Link(_, tail)):
+                return tail
+            case _:
+                raise ValueError(f"Failed to evaluate operator {self.print((op, *args))}")
+
+    def print(self, expr: SExpr) -> str:
+        return print_sexpr(expr)
 
 
 @attr.s(auto_detect=True)
@@ -114,274 +231,37 @@ class Lambda:
     body: SExpr = attr.ib()
     scope: "Scope" = attr.ib()
 
-    def eval(self, args: Iterable[SExpr], calling_scope: "Scope") -> "Value":
-        lambda_scope = dict(self.scope)
-        bound_params = {param.value: Reference.lazy(arg, calling_scope) for param, arg in zip(self.params, args)}
-        lambda_scope.update(**bound_params)
-        return eval_expr(self.body, scope=lambda_scope)
-
     def __repr__(self):
-        return f"<{self.__class__.__name__.upper()} {print_expr(self.params)} => {print_expr(self.body)} scope={set(self.scope.keys())}>"
+        return f"<{self.__class__.__name__.upper()} {print_sexpr(self.params)} => {print_sexpr(self.body)}>"
 
 
 class Macro(Lambda):
-    def eval(self, args: List[SExpr], calling_scope: "Scope") -> "Value":
-        lambda_scope = dict(self.scope)
-        bound_params = {param.value: Reference.value(arg) for param, arg in zip(self.params, args)}
-        lambda_scope.update(**bound_params)
-        resulting_expression = eval_expr(self.body, scope=lambda_scope)
-        return eval_expr(resulting_expression, scope=calling_scope)
-
-
-Value = Literal | Lambda | Builtin | LinkedList
-
-
-def parse(tokens: List[Token]) -> SExpr | Tuple[SExpr, ...]:
-    level = 0
-    expressions: List[List[SExpr | Tuple]] = []
-
-    for t in tokens:
-        match t:
-            case Token(type_=TokenType.OPEN_PAREN):
-                level += 1
-                expressions.append([])
-            case Token(
-                type_=TokenType.STRING | TokenType.FLOAT | TokenType.INTEGER | TokenType.BOOL | TokenType.SYMBOL | TokenType.BUILTIN,
-                value=v):
-                if level == 0:
-                    return v
-                expressions[-1].append(v)
-            case Token(type_=TokenType.CLOSE_PAREN):
-                level -= 1
-                expr = tuple(expressions.pop())
-                if level == 0:
-                    return expr
-                if level < 0:
-                    raise RuntimeError("Mismatched parens!")
-                expressions[-1].append(expr)
-            case _:
-                raise ValueError(f"Unexpected token: {t}")
-
-
-def read_expr(s: str) -> SExpr:
-    raw_tokens = tokenize_string(s)
-    tokens = process_tokens(raw_tokens)
-    expr_tuple = parse(tokens)
-    return LinkedList.linkify(expr_tuple
-                              )
+    pass
 
 
 class Reference:
-    def __init__(self, expr: Optional[SExpr] = None, scope: Optional["Scope"] = None, value: Optional[Value] = None):
-        self._expr = expr
-        self._scope = scope
+    def __init__(self, thunk: Optional[Callable[[], SExpr]] = None, value: Optional[SExpr] = None):
+        self._thunk = thunk
         self._value = value
-        assert value is not None or expr is not None, "either value or expression must be present"
+        assert value is not None or thunk is not None, "either value or thunk must be present"
 
-    def get(self) -> Value:
-        if self._value:
+    def get(self) -> SExpr:
+        if self._value is not None:
             return self._value
 
-        self._value = eval_expr(self._expr, self._scope)
+        self._value = self._thunk()
         return self._value
 
     @classmethod
-    def value(cls, value: Value) -> "Reference":
+    def value(cls, value: SExpr) -> "Reference":
         return cls(value=value)
 
     @classmethod
-    def lazy(cls, expr: SExpr, scope: Optional["Scope"]) -> "Reference":
-        return cls(expr=expr, scope=scope)
+    def lazy(cls, thunk: Callable[[], SExpr]) -> "Reference":
+        return cls(thunk=thunk)
 
+    def __repr__(self):
+        val_str = str(self._value) if self._value is not None else "___"
+        thunk_str = f"({self._thunk})" if self._value is None else ""
+        return f"<ref: {val_str} {thunk_str}>"
 
-Scope = Dict[str, Reference]
-
-
-def eval_expr(expr: SExpr, scope: Optional[Scope] = None):
-    # TODO type checking
-    if scope is None:
-        scope: Scope = {}
-    match expr:
-        case () | Empty() | Builtin.NIL:
-            return Empty()
-        case int() | float() | str() | bool() | Builtin():
-            return expr
-        case Symbol(value=v):
-            return scope[v].get()
-        case Link(value=Builtin.COND, rest=conditions):
-            for test, action in conditions:
-                test_result = eval_expr(test, scope)
-                assert isinstance(test_result, bool), f"condition {print_expr(test)} must be bool"
-                if test_result:
-                    return eval_expr(action, scope)
-            return Empty()
-        case Link(value=Builtin.SET, rest=args):
-            symbol, sub_expr = args
-            new_value = eval_expr(sub_expr, scope)
-            scope[symbol.value] = Reference.value(new_value)
-            return new_value
-        case Link(value=Builtin.LET, rest=args):
-            name, value, body = args
-            # TODO make this a macro / sugar
-            new_expr = LinkedList.linkify(((Builtin.LAMBDA, (name,), body), value))
-            return eval_expr(new_expr, scope)
-        case Link(value=Builtin.LAMBDA, rest=args):
-            params, body = args
-            return Lambda(params=tuple(params), body=body, scope=scope)
-        case Link(value=Builtin.MACRO, rest=args):
-            params, body = args
-            return Macro(params=tuple(params), body=body, scope=scope)
-        case Link(value=Builtin.SEXPR, rest=body):
-            return body
-        case Link(value=Builtin.QUOTE, rest=Link(value=body, rest=Empty())):
-            return body
-        case Link(value=head, rest=args):
-            head_eval = eval_expr(head, scope)
-            match head_eval:
-                case Builtin():
-                    return apply_operator(head_eval, *[eval_expr(e, scope) for e in args])
-                case Lambda():
-                    return head_eval.eval(args, calling_scope=scope)
-                case _:
-                    raise ValueError(f"Head expression evaluated to non-callable: {print_expr(head_eval)}")
-        case _:
-            raise ValueError(f"Failed to evaluate expression: {print_expr(expr)}")
-
-
-def apply_operator(op: Builtin, *args: Value) -> Value:
-    match (op, *args):
-        case (Builtin.ADD, *args):
-            return sum(args)
-        case (Builtin.SUB, first, second):
-            return first - second
-        case (Builtin.MUL, *args):
-            return reduce(lambda x, y: x * y, args, initial=1)
-        case (Builtin.DIV, dividend, divisor):
-            return dividend / divisor
-        case (Builtin.EQ, left, right):
-            return left == right
-        case (Builtin.LT, left, right):
-            return left < right
-        case (Builtin.LTE, left, right):
-            return left <= right
-        case (Builtin.GT, left, right):
-            return left > right
-        case (Builtin.GTE, left, right):
-            return left >= right
-        case (Builtin.READ, expr):
-            return read_expr(expr)
-        case (Builtin.EVAL, expr):
-            return eval_expr(expr)
-        case (Builtin.PRINT, arg):
-            return print_expr(arg)
-        case (Builtin.STRCAT, *args):
-            return "".join(args)
-        case (Builtin.STRFMT, s, *args):
-            return s % tuple(args)
-        case (Builtin.ASSERT, condition):
-            assert condition
-            return True
-        case (Builtin.ASSERT, condition, message):
-            assert condition, message
-            return True
-        case (Builtin.TYPEID, arg):
-            return type(arg).__name__.lower()
-        case (Builtin.SYMBOL, s):
-            return isinstance(s, Symbol)
-        # List ops
-        case (Builtin.LIST, *args):
-            return LinkedList.of(*args)
-        case (Builtin.CONS, head, tail):
-            return Link(head, tail)
-        case (Builtin.HEAD | Builtin.TAIL, Empty()):
-            raise ValueError(f"Can't call {op} on empty list")
-        case (Builtin.HEAD, Link(head, _)):
-            return head
-        case (Builtin.TAIL, Link(_, tail)):
-            return tail
-        case _:
-            raise ValueError(f"Failed to evaluate operator {print_expr((op, *args))}")
-
-
-def print_expr(expr: SExpr | Tuple[SExpr, ...]) -> str:
-    match expr:
-        case int() | float() | bool():
-            return str(expr).lower()
-        case str():
-            return repr(expr)
-        case Symbol(value=v):
-            return str(v)
-        case Builtin():
-            return repr(expr)
-        case Lambda():
-            return repr(expr)
-        case tuple() | LinkedList():
-            return "(" + " ".join(print_expr(e) for e in expr) + ")"
-        case _:
-            return repr(expr)
-
-
-T = TypeVar("T")
-U = TypeVar("U")
-
-
-def reduce(fun: Callable[[U, T], U], items: List[T], initial: U) -> U:
-    result = initial
-    for i in items:
-        result = fun(result, i)
-    return result
-
-
-def load_file(filename: str, scope: Scope):
-    return
-    print(f"Loading preamble...")
-    lines = [s.strip() for s in preamble.strip().split("\n")]
-    for l in lines:
-        print(f"> {l}")
-        expression = read_expr(l)
-        eval_expr(expression, scope=scope)
-
-
-def quick_eval(s: str) -> SExpr:
-    return eval_expr(read_expr(s))
-
-
-def main():
-    # loads improved prompt interaction (e.g. arrow keys and the like)
-    import readline
-    readline.read_init_file("./editrc")
-
-    scope: Scope = {}
-    load_file("./samples/stdlib.lisp")
-
-    while True:
-        string = input("> ")
-        if not string:
-            continue
-        try:
-            # parse special commands
-            if string.startswith("!"):
-                match string.split():
-                    case "!load", *name:
-                        load_file(name, scope)
-                    case ["!scope"]:
-                        pprint.pprint(scope, indent=4)
-                    case ["!scope", *expr]:
-                        expr_string = " ".join(expr)
-                        result = eval_expr(read_expr(expr_string), scope=scope)
-                        if not isinstance(result, Lambda):
-                            raise ValueError(f"Result [{result}] is not a lambda!")
-                        pprint.pprint(result.scope, indent=4)
-                    case _:
-                        raise ValueError(f"Could not understand command {string}")
-                continue
-            else:
-                expression = read_expr(string)
-                result = eval_expr(expression, scope=scope)
-                print(print_expr(result))
-        except Exception as e:
-            traceback.print_exception(e)
-
-
-if __name__ == "__main__":
-    main()

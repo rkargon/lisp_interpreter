@@ -1,6 +1,17 @@
-from typing import Tuple, Any, Iterable
+from typing import Tuple, Any, Iterable, Callable, TypeVar
 
 import attr
+
+
+T = TypeVar("T")
+U = TypeVar("U")
+
+
+def reduce(fun: Callable[[U, T], U], items: Iterable[T], initial: U) -> U:
+    result = initial
+    for i in items:
+        result = fun(result, i)
+    return result
 
 
 class LinkedList:
@@ -52,7 +63,6 @@ class LinkedList:
                 return tuple(map(cls.tuplify, sexpr))
             case _:
                 return sexpr
-
 
     @classmethod
     def empty(cls):
