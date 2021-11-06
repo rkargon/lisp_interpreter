@@ -2,7 +2,7 @@
 
 import enum
 from abc import abstractmethod
-from typing import List, Iterable, Optional, Tuple, Dict, Callable, Set
+from typing import Optional, Tuple, Dict, Callable, Set
 
 import attr
 
@@ -44,18 +44,9 @@ class Interpreter:
         interpreter.init()
         return interpreter.repl(string)
 
-    def load_file(self, filename: str):
-        with open(filename, "r") as f:
-            for l in f.readlines():
-                lstrip = l.strip()
-                if not lstrip:
-                    continue
-                print("> ", lstrip)
-                self.repl(lstrip)
-
 
 class Builtins(Builtin, enum.Enum):
-    LET = "let"
+    # LET = "let"
     SET = "set"
     LAMBDA = "lambda"
     MACRO = "macro"
@@ -125,29 +116,31 @@ class LispInterpreter(Interpreter):
                     if test_result:
                         return self._eval_with_scope(action, scope)
                 return Empty()
-            case Link(value=Builtins.SET, rest=args):
-                symbol, sub_expr = args
-                new_value = self._eval_with_scope(sub_expr, scope)
-                scope[symbol.value] = Reference.value(new_value)
-                return new_value
-            case Link(value=Builtins.LET, rest=args):
-                name, value, body = args
-                # TODO make this a macro / sugar
-                new_expr = LinkedList.linkify(((Builtins.LAMBDA, (name,), body), value))
-                return self._eval_with_scope(new_expr, scope)
-            case Link(value=Builtins.LAMBDA, rest=args):
-                params, body = args
-                return Lambda(params=tuple(params), body=body, scope=scope)
-            case Link(value=Builtins.MACRO, rest=args):
-                params, body = args
-                return Macro(params=tuple(params), body=body, scope=scope)
-            case Link(value=Builtins.SEXPR, rest=body):
-                return body
-            case Link(value=Builtins.QUOTE, rest=Link(value=body, rest=Empty())):
-                return body
             case Link(value=head, rest=args):
                 head_eval = self._eval_with_scope(head, scope)
                 match head_eval:
+                    case Builtins.COND:
+                        for test, action in args:
+                            test_result = self._eval_with_scope(test, scope)
+                            assert isinstance(test_result, bool), f"condition {self.print(test)} must be bool"
+                            if test_result:
+                                return self._eval_with_scope(action, scope)
+                        return Empty()
+                    case Builtins.SET:
+                        symbol, sub_expr = args
+                        new_value = self._eval_with_scope(sub_expr, scope)
+                        scope[symbol.value] = Reference.value(new_value)
+                        return new_value
+                    case Builtins.LAMBDA:
+                        params, body = args
+                        return Lambda(params=tuple(params), body=body, scope=scope)
+                    case Builtins.MACRO:
+                        params, body = args
+                        return Macro(params=tuple(params), body=body, scope=scope)
+                    case Builtins.SEXPR:
+                        return args
+                    case Builtins.QUOTE:
+                        return args.value
                     case Builtin():
                         return self._apply_operator(head_eval, *[self._eval_with_scope(e, scope) for e in args])
                     case Macro():
@@ -264,4 +257,3 @@ class Reference:
         val_str = str(self._value) if self._value is not None else "___"
         thunk_str = f"({self._thunk})" if self._value is None else ""
         return f"<ref: {val_str} {thunk_str}>"
-

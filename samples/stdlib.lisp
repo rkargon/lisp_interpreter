@@ -7,6 +7,9 @@
 ;; func ops
 (set comp (lambda (f g) (lambda (x) (f (g x)))))
 (set fog comp)
+(set let (macro (name, value, body) (list (list lambda (list name) body) value)))
+(set dec (lambda (n) (- n 1)))
+(set inc (lambda (n) (+ n 1)))
 
 ;; list ops
 (set is_nil (lambda (l) (= l nil)))
