@@ -1,6 +1,8 @@
 import pprint
 import traceback
+from typing import List
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.layout.processors import HighlightMatchingBracketProcessor
 from pygments import highlight
 from pygments.formatters.terminal256 import Terminal256Formatter
@@ -13,25 +15,34 @@ from lisp import Interpreter
 
 class Editor:
 
-    def __init__(self, interpreter: Interpreter):
-        self.interpreter = interpreter
+    def __init__(self, interpreter: Interpreter, prelude_filenames: List[str] = None):
+        self.interpreter: Interpreter = interpreter
+        self.prompt_session: PromptSession = None
+        self.prelude_filenames = prelude_filenames or []
+        self.init()
 
-        import readline
-        readline.read_init_file("./editrc")
+    def init(self):
+        """
+        Wipes program state & resets prompt session
+        """
+        self.interpreter.init()
+        self.prompt_session = PromptSession(
+            lexer=PygmentsLexer(SchemeLexer),
+            input_processors=[HighlightMatchingBracketProcessor()]
+        )
 
     def prompt(self) -> str:
-        # TODO use pygments
-        return prompt("> ", lexer=PygmentsLexer(SchemeLexer), input_processors=[HighlightMatchingBracketProcessor()])
+        return self.prompt_session.prompt("> ", lexer=PygmentsLexer(SchemeLexer),
+                                          input_processors=[HighlightMatchingBracketProcessor()])
 
     def print(self, s: str):
         print(highlight(s, SchemeLexer(), Terminal256Formatter()).strip())
 
     def run(self):
-        # wipe state
-        self.interpreter.init()
+        self.init()
 
-        # load stdlib
-        self.load_file("./samples/stdlib.lisp")
+        for fn in self.prelude_filenames:
+                self.load_file(fn)
 
         while True:
             string = self.prompt()

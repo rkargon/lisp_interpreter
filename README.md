@@ -8,8 +8,6 @@ Experiments w/ writing a LISP interpreter.
 - Lazy evaluation
 
 ## TODO:
-
-- macro system
 - make it self hosting
 - system for syntactic sugar? (might just do this via macros)
 - types?
@@ -18,3 +16,4 @@ Experiments w/ writing a LISP interpreter.
 - Improved REPL
   - highlighting?
   - completion?
+- tail recursion

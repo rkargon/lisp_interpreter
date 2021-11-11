@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
 import enum
+import math
 from abc import abstractmethod
-from typing import Optional, Tuple, Dict, Callable, Set
+from typing import Optional, Tuple, Dict, Callable, Set, Type
 
 import attr
 
@@ -76,6 +77,8 @@ class Builtins(Builtin, enum.Enum):
     SUB = "-"
     MUL = "*"
     DIV = "/"
+    MOD = "%"
+    MATH = "math" # calls a function from python's math module
     EQ = "="
     NEQ = "!="
     LT = "<"
@@ -170,8 +173,14 @@ class LispInterpreter(Interpreter):
                 return util.reduce(lambda x, y: x * y, args, initial=1)
             case (Builtins.DIV, dividend, divisor):
                 return dividend / divisor
+            case (Builtins.MOD, dividend, divisor):
+                return dividend % divisor
+            case (Builtins.MATH, func_name, *args):
+                return getattr(math, func_name)(*args)
             case (Builtins.EQ, left, right):
                 return left == right
+            case (Builtins.NEQ, left, right):
+                return left != right
             case (Builtins.LT, left, right):
                 return left < right
             case (Builtins.LTE, left, right):
@@ -217,6 +226,9 @@ class LispInterpreter(Interpreter):
     def print(self, expr: SExpr) -> str:
         return print_sexpr(expr)
 
+class TinyLispInterpreter(LispInterpreter):
+    def __init__(self):
+        super().__init__(builtins={"lambda", "set"})
 
 @attr.s(auto_detect=True)
 class Lambda:

@@ -6,8 +6,8 @@ import editor
 
 def main():
     args = sys.argv[1:]
-    interpreter = lisp.LispInterpreter()
-    repl = editor.Editor(interpreter)
+    interpreter = lisp.TinyLispInterpreter()
+    repl = editor.Editor(interpreter, prelude_filenames=["samples/church.lisp"])
     repl.run()
 
 

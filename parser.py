@@ -48,6 +48,9 @@ class Builtin:
             return False
         return self.keyword == other.keyword
 
+    def __hash__(self):
+        return hash(self.keyword)
+
 
 
 @attr.s(auto_detect=True)
@@ -103,7 +106,7 @@ class DefaultPythonTokenizer(Tokenizer):
                 return Token(TokenType.FLOAT, n)
             case (tknz.STRING, s):
                 return Token(TokenType.STRING, ast.literal_eval(s))
-            case (tknz.NAME, "true" | "false" as s):
+            case (tknz.NAME, "true" | "false" as s) if s in self._builtins:
                 return Token(TokenType.BOOL, s)
             case (tknz.NAME, s) if s in self._builtins:
                 return Token(TokenType.BUILTIN, s)
