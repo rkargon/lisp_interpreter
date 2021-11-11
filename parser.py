@@ -116,6 +116,8 @@ class DefaultPythonTokenizer(Tokenizer):
                 return Token(TokenType.COMMENT, ";")
             case (_, op) if op in self._builtins:
                 return Token(TokenType.BUILTIN, op)
+            case (_, op) if op in tknz.EXACT_TOKEN_TYPES:
+                return Token(TokenType.SYMBOL, op)
             case _:
                 return None
 
